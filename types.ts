@@ -8,7 +8,7 @@ export enum PieceType {
   PROTECTOR = 'PROTECTOR',
 }
 
-export type GameMode = 'PVE' | 'PVP';
+export type GameMode = 'PVE' | 'PVP' | 'ONLINE';
 
 export interface Position {
   row: number;

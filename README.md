@@ -13,13 +13,20 @@ Win by either:
 
 ### **The Units**
 *   **Samurai (5 Points)**: 
-    *   Moves 1 step forward.
-    *   Captures diagonally forward (or 1 step forward into an enemy).
-    *   *Role:* The Phalanx. Use them to block paths and force trades.
+    *   Moves 1 step **Forward**, **Left**, or **Right**.
+    *   Cannot move Backward or Diagonally.
+    *   *Role:* The Phalanx. Use them to block paths and control space laterally.
 *   **Protector (10 Points)**: 
-    *   **Normal State**: Moves 1 step in any direction. Vulnerable.
-    *   **Raging State (The Sniper)**: When standing on the **Opponent's End Row**, moves like a Queen (Infinite range in all directions).
-    *   *Constraint:* If the Protector leaves the End Row to move to the middle of the board, it **immediately loses** its Raging powers and reverts to the Normal State.
+    *   **Normal State**: Moves 1 step in any direction.
+    *   **Raging State**: When standing on the **Opponent's End Row**, moves like a Queen (Infinite range).
+    *   *Constraint:* Leaving the End Row reverts it to Normal State.
+
+### **Controls**
+New keyboard-first control scheme:
+*   **Select Pieces**: `Z`, `X`, `C`, `V`, `B` keys map to your 5 units.
+*   **Move**: `Arrow Keys` for 1-step moves.
+*   **Long Jump**: Type Coordinate (e.g., `A0`) for Promoted Protector long moves.
+
 
 ### **Game Modes**
 *   **PVE**: Play against a greedy heuristic AI.

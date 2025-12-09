@@ -20,14 +20,14 @@ export const generateBoard = (): Piece[] => {
   // Nissi Samurai Setup: All 5 pawns on the first line (Row 0 for AI, Row 9 for Player)
   // Grid is 10x10. Center cols are 4 and 5.
   // Formation: Samurai, Samurai, Protector, Samurai, Samurai
-  
+
   // AI (Top - Row 0)
   addPiece(PieceType.SAMURAI, PlayerType.AI, 0, 3);
   addPiece(PieceType.SAMURAI, PlayerType.AI, 0, 4);
   addPiece(PieceType.PROTECTOR, PlayerType.AI, 0, 5); // Center-Right
   addPiece(PieceType.SAMURAI, PlayerType.AI, 0, 6);
   addPiece(PieceType.SAMURAI, PlayerType.AI, 0, 7);
-  
+
   // Player (Bottom - Row 9)
   addPiece(PieceType.SAMURAI, PlayerType.PLAYER, GRID_SIZE - 1, 3);
   addPiece(PieceType.SAMURAI, PlayerType.PLAYER, GRID_SIZE - 1, 4);
@@ -54,20 +54,26 @@ export const getValidMoves = (piece: Piece, allPieces: Piece[]): Position[] => {
   const moves: Position[] = [];
   const { row, col } = piece.position;
   const forwardDir = piece.owner === PlayerType.PLAYER ? -1 : 1;
-  
+
   // Target rows for promotion mechanics
   const opponentEndRow = piece.owner === PlayerType.PLAYER ? 0 : GRID_SIZE - 1;
 
   if (piece.type === PieceType.SAMURAI) {
-    // Samurai: 1 step forward only
-    const potential: Position = { row: row + forwardDir, col: col };
-    
-    if (isValidPos(potential)) {
-       // Can move if empty OR opponent (capture)
-       const target = getPieceAt(allPieces, potential);
-       if (!target || target.owner !== piece.owner) {
-         moves.push(potential);
-       }
+    // Samurai: 1 step forward OR 1 step sideways (Left/Right)
+    const potentialMoves: Position[] = [
+      { row: row + forwardDir, col: col }, // Forward
+      { row: row, col: col - 1 },          // Left
+      { row: row, col: col + 1 }           // Right
+    ];
+
+    for (const potential of potentialMoves) {
+      if (isValidPos(potential)) {
+        // Can move if empty OR opponent (capture)
+        const target = getPieceAt(allPieces, potential);
+        if (!target || target.owner !== piece.owner) {
+          moves.push(potential);
+        }
+      }
     }
   } else if (piece.type === PieceType.PROTECTOR) {
     // RULE UPDATE: Multi-step moves are only allowed WHILE the piece is standing in the opponent's end row.
@@ -80,8 +86,8 @@ export const getValidMoves = (piece: Piece, allPieces: Piece[]): Position[] => {
       // NOTE: If it moves out of the end row, it will lose this power next turn.
       const directions = [
         [-1, -1], [-1, 0], [-1, 1],
-        [0, -1],           [0, 1],
-        [1, -1],  [1, 0],  [1, 1]
+        [0, -1], [0, 1],
+        [1, -1], [1, 0], [1, 1]
       ];
 
       for (const [dr, dc] of directions) {
@@ -104,10 +110,10 @@ export const getValidMoves = (piece: Piece, allPieces: Piece[]): Position[] => {
     } else {
       // NORMAL BEHAVIOR: 1 step any direction
       // It must walk step-by-step to reach the end.
-       const offsets = [
+      const offsets = [
         [-1, -1], [-1, 0], [-1, 1],
-        [0, -1],           [0, 1],
-        [1, -1],  [1, 0],  [1, 1]
+        [0, -1], [0, 1],
+        [1, -1], [1, 0], [1, 1]
       ];
       for (const [dr, dc] of offsets) {
         const potential = { row: row + dr, col: col + dc };
@@ -131,11 +137,11 @@ export const executeMove = (pieces: Piece[], move: Move): { pieces: Piece[], kil
   if (movingPieceIndex === -1) return { pieces, killed: null };
 
   const movingPiece = { ...pieces[movingPieceIndex] };
-  
+
   // Check capture
   const targetIndex = pieces.findIndex(p => isPositionEqual(p.position, move.to));
   let killed: Piece | null = null;
-  
+
   let nextPieces = [...pieces];
 
   if (targetIndex !== -1) {
@@ -174,7 +180,7 @@ export const calculateCurrentScore = (pieces: Piece[]): { player: number, ai: nu
 
 export const calculateScore = (pieces: Piece[], graveyard: Piece[]): Scoring => {
   const scores = calculateCurrentScore(pieces);
-  
+
   let winner: PlayerType | 'DRAW' | null = null;
   if (scores.player > scores.ai) winner = PlayerType.PLAYER;
   else if (scores.ai > scores.player) winner = PlayerType.AI;
@@ -199,60 +205,162 @@ export const checkInstantWin = (graveyard: Piece[]): PlayerType | null => {
 };
 
 
-// --- Simple AI (Greedy / Minimax-lite) ---
+// --- Engineered AI (Minimax with Alpha-Beta Pruning) ---
+
+// AI Tuning Parameters
+const MAX_DEPTH = 3; // Look 3 moves ahead (Ply)
+const SCORES = {
+  WIN: 100000,
+  PROTECTOR: 2000,
+  SAMURAI: 100,
+  MOBILITY: 5,
+  ADVANCE: 10,
+  CENTER_CONTROL: 15,
+  THREAT: 50
+};
 
 export const getBestAIMove = (pieces: Piece[]): Move | null => {
+  // 1. Get all possible moves for AI
   const aiPieces = pieces.filter(p => p.owner === PlayerType.AI);
-  let bestMove: Move | null = null;
-  let bestScore = -Infinity;
+  let allMoves: { move: Move, score: number }[] = [];
 
   for (const piece of aiPieces) {
     const validMoves = getValidMoves(piece, pieces);
     for (const to of validMoves) {
-      // Simulate
-      const target = getPieceAt(pieces, to);
-      
-      // Instant Win Check
-      if (target && target.type === PieceType.PROTECTOR && target.owner === PlayerType.PLAYER) {
-        return { from: piece.position, to };
-      }
+      allMoves.push({ move: { from: piece.position, to }, score: 0 });
+    }
+  }
 
-      let currentScore = 0;
+  // Shuffle to avoid predictable behavior on tied scores
+  allMoves = allMoves.sort(() => Math.random() - 0.5);
 
-      // Heuristic: Capture Logic
-      if (target) {
-        currentScore += (target.type === PieceType.PROTECTOR ? 10000 : 100);
-      }
+  let bestMove: Move | null = null;
+  let bestValue = -Infinity;
+  let alpha = -Infinity;
+  let beta = Infinity;
 
-      // Heuristic: Promotion logic
-      // AI wants to reach Row 9
-      if (piece.type === PieceType.PROTECTOR) {
-        // If not at end, highly incentivize getting closer
-        if (piece.position.row !== GRID_SIZE - 1) {
-             if (to.row === GRID_SIZE - 1) currentScore += 1000; // Get to power zone
-             else if (to.row > piece.position.row) currentScore += 50; // Move forward
-        } else {
-             // If ALREADY at end (Power Zone)
-             // Incentivize using the power to kill, but be careful about leaving
-             if (target) currentScore += 500; // Good to leave if we get a kill
+  // 2. Run Minimax on each root move
+  for (const item of allMoves) {
+    // Execute move virtually
+    const result = executeMove(pieces, item.move);
+
+    // Check for Instant Win immediately
+    if (result.killed && result.killed.type === PieceType.PROTECTOR && result.killed.owner === PlayerType.PLAYER) {
+      return item.move;
+    }
+
+    // Call recursive Minimax
+    const boardValue = minimax(result.pieces, MAX_DEPTH - 1, false, alpha, beta);
+
+    if (boardValue > bestValue) {
+      bestValue = boardValue;
+      bestMove = item.move;
+    }
+
+    alpha = Math.max(alpha, bestValue);
+  }
+
+  return bestMove;
+};
+
+const minimax = (
+  currentPieces: Piece[],
+  depth: number,
+  isMaximizing: boolean,
+  alpha: number,
+  beta: number
+): number => {
+
+  // Base Case: Leaf node or Depth limit
+  if (depth === 0) {
+    return evaluateBoard(currentPieces);
+  }
+
+  const currentPlayer = isMaximizing ? PlayerType.AI : PlayerType.PLAYER;
+  const activePieces = currentPieces.filter(p => p.owner === currentPlayer);
+
+  if (isMaximizing) {
+    let maxEval = -Infinity;
+    for (const piece of activePieces) {
+      const validMoves = getValidMoves(piece, currentPieces);
+      for (const to of validMoves) {
+
+        const result = executeMove(currentPieces, { from: piece.position, to });
+
+        // Critical: Check Win/Loss conditions inside recursion
+        if (result.killed && result.killed.type === PieceType.PROTECTOR) {
+          // If AI killed Player Protector -> Huge Win
+          if (result.killed.owner === PlayerType.PLAYER) return SCORES.WIN + depth; // Prefer winning sooner
         }
+
+        const evalScore = minimax(result.pieces, depth - 1, false, alpha, beta);
+        maxEval = Math.max(maxEval, evalScore);
+        alpha = Math.max(alpha, evalScore);
+        if (beta <= alpha) break; // Prune
       }
+      if (beta <= alpha) break;
+    }
+    return maxEval === -Infinity ? evaluateBoard(currentPieces) : maxEval; // Handle no moves
+  } else {
+    // Minimizing Player (Human)
+    let minEval = Infinity;
+    for (const piece of activePieces) {
+      const validMoves = getValidMoves(piece, currentPieces);
+      for (const to of validMoves) {
 
-      // Aggression with Samurai
-      if (piece.type === PieceType.SAMURAI) {
-        currentScore += 10;
-        // Bias towards center
-        if (to.col >= 3 && to.col <= 6) currentScore += 5;
+        const result = executeMove(currentPieces, { from: piece.position, to });
+
+        if (result.killed && result.killed.type === PieceType.PROTECTOR) {
+          // If Player killed AI Protector -> Huge Loss
+          if (result.killed.owner === PlayerType.AI) return -SCORES.WIN - depth;
+        }
+
+        const evalScore = minimax(result.pieces, depth - 1, true, alpha, beta);
+        minEval = Math.min(minEval, evalScore);
+        beta = Math.min(beta, evalScore);
+        if (beta <= alpha) break; // Prune
       }
+      if (beta <= alpha) break;
+    }
+    return minEval === Infinity ? evaluateBoard(currentPieces) : minEval;
+  }
+};
 
-      currentScore += Math.random() * 10;
+const evaluateBoard = (pieces: Piece[]): number => {
+  let score = 0;
 
-      if (currentScore > bestScore) {
-        bestScore = currentScore;
-        bestMove = { from: piece.position, to };
+  for (const p of pieces) {
+    const isAi = p.owner === PlayerType.AI;
+    const multiplier = isAi ? 1 : -1;
+
+    // 1. Material Score
+    let materialVal = p.type === PieceType.PROTECTOR ? SCORES.PROTECTOR : SCORES.SAMURAI;
+    score += materialVal * multiplier;
+
+    // 2. Positional Score (Advance towards enemy)
+    // AI starts 0, wants 9. Player starts 9, wants 0.
+    const advanceRow = isAi ? p.position.row : (GRID_SIZE - 1 - p.position.row);
+    score += (advanceRow * SCORES.ADVANCE) * multiplier;
+
+    // 3. Center Control (Encourage fighting in the middle)
+    if (p.position.col >= 3 && p.position.col <= 6) {
+      score += SCORES.CENTER_CONTROL * multiplier;
+    }
+
+    // 4. Killer Instinct (Threats) & Safety
+    // This is expensive to calculate fully, so we use simplified heuristics
+    // e.g. if Samurai is very close to enemy Protector
+    if (p.type === PieceType.SAMURAI) {
+      // Find enemy protector
+      const enemyProt = pieces.find(ep => ep.owner !== p.owner && ep.type === PieceType.PROTECTOR);
+      if (enemyProt) {
+        const dist = Math.abs(p.position.row - enemyProt.position.row) + Math.abs(p.position.col - enemyProt.position.col);
+        if (dist <= 3) {
+          score += (SCORES.THREAT / dist) * multiplier; // Closer = More threat score
+        }
       }
     }
   }
 
-  return bestMove;
+  return score;
 };
