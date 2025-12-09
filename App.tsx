@@ -15,7 +15,7 @@ import {
 } from './utils/gameLogic';
 import { Piece, PlayerType, Position, Move, Scoring, PieceType, GameMode } from './types';
 import { RulesModal } from './components/RulesModal';
-import { io, Socket } from 'socket.io-client';
+import Peer, { DataConnection } from 'peerjs';
 
 // Helper for Online Logic
 type AppView = 'RULES' | 'SETUP' | 'LOBBY' | 'GAME';
@@ -47,66 +47,104 @@ const App: React.FC = () => {
   const [gameOver, setGameOver] = useState<boolean>(false);
   const [scoring, setScoring] = useState<Scoring | null>(null);
 
-  // --- Online State ---
-  const [socket, setSocket] = useState<Socket | null>(null);
+  // --- Online State (PeerJS) ---
+  const [peer, setPeer] = useState<Peer | null>(null);
+  const [conn, setConn] = useState<DataConnection | null>(null);
   const [roomId, setRoomId] = useState('');
   const [myOnlineRole, setMyOnlineRole] = useState<PlayerType | null>(null); // PLAYER (Host) or AI (Joiner)
-  const [lobbyStatus, setLobbyStatus] = useState<'IDLE' | 'WAITING'>('IDLE');
+  const [lobbyStatus, setLobbyStatus] = useState<'IDLE' | 'WAITING' | 'CONNECTING'>('IDLE');
   const [joinCodeInput, setJoinCodeInput] = useState('');
 
-  // --- Socket Initialization ---
+  // Cleanup peer on unmount
   useEffect(() => {
-    // Connect to server (use env var in production, localhost in dev)
-    const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
-    const newSocket = io(SERVER_URL);
-    setSocket(newSocket);
+    return () => {
+      peer?.destroy();
+    };
+  }, []);
 
-    newSocket.on('room_created', (id: string) => {
+  // --- Connection Logic ---
+
+  const createRoom = () => {
+    // 1. Create Peer (Host)
+    // We strictly use a random ID or let PeerJS generate one.
+    // PeerJS ID generation is safer.
+    const newPeer = new Peer();
+    setPeer(newPeer);
+    setLobbyStatus('WAITING');
+
+    newPeer.on('open', (id) => {
       setRoomId(id);
-      setLobbyStatus('WAITING');
-      setMyOnlineRole(PlayerType.PLAYER); // Creator is Player 1
     });
 
-    newSocket.on('game_start', ({ players }: { players: string[] }) => {
-      // Determine role if not set (Joiner)
-      // players[0] is Host (PLAYER), players[1] is Joiner (AI side)
-      const amIHost = players[0] === newSocket.id;
-      const myRole = amIHost ? PlayerType.PLAYER : PlayerType.AI;
-      setMyOnlineRole(myRole);
-
-      // Start Game
-      startGame(10, 'ONLINE'); // Default online 10 mins? Or sync it. For now fixed.
+    newPeer.on('connection', (connection) => {
+      // Opponent connected!
+      connection.on('open', () => {
+        handleOnlineGameStart(connection, PlayerType.PLAYER);
+      });
+      connection.on('data', (data) => handleReceivedData(data));
+      connection.on('close', handleOpponentDisconnect);
+      setConn(connection);
     });
 
-    newSocket.on('opponent_move', ({ move, newState }: { move: Move, newState?: any }) => {
-      // Execute opponent move visually
-      // ensuring we don't re-emit
-      processMove(move, false);
-    });
-
-    newSocket.on('player_left', () => {
-      alert('Opponent disconnected.');
-      setGameOver(true);
-      setStarted(false);
-      setView('SETUP');
-    });
-
-    newSocket.on('error', (msg: string) => {
-      alert(msg);
+    newPeer.on('error', (err) => {
+      alert('Connection Error: ' + err.type);
       setLobbyStatus('IDLE');
     });
+  };
 
-    return () => {
-      newSocket.disconnect();
-    };
-  }, []); // Run once on mount
+  const joinRoom = (targetId: string) => {
+    // 1. Create Peer (Joiner)
+    const newPeer = new Peer();
+    setPeer(newPeer);
+    setLobbyStatus('CONNECTING');
+
+    newPeer.on('open', () => {
+      // 2. Connect to Host
+      const connection = newPeer.connect(targetId);
+
+      connection.on('open', () => {
+        handleOnlineGameStart(connection, PlayerType.AI);
+      });
+      connection.on('data', (data) => handleReceivedData(data));
+      connection.on('close', handleOpponentDisconnect);
+      connection.on('error', (err) => {
+        alert('Could not connect to room. Check code.');
+        setLobbyStatus('IDLE');
+      });
+      setConn(connection);
+    });
+
+    newPeer.on('error', (err) => {
+      alert('Connection Error: ' + err.type);
+      setLobbyStatus('IDLE');
+    });
+  };
+
+  const handleOnlineGameStart = (connection: DataConnection, myRole: PlayerType) => {
+    setMyOnlineRole(myRole);
+    startGame(10, 'ONLINE'); // Fixed 10 min for online
+  };
+
+  const handleReceivedData = (data: any) => {
+    if (data.type === 'MOVE') {
+      processMove(data.move, false);
+    }
+  };
+
+  const handleOpponentDisconnect = () => {
+    alert('Opponent Disconnected!');
+    setGameOver(true);
+    setStarted(false);
+    setView('SETUP');
+    setLobbyStatus('IDLE');
+    peer?.destroy();
+    setPeer(null);
+    setConn(null);
+  }
 
   // --- Timer ---
   useEffect(() => {
     if (!started || gameOver) return;
-
-    // In Online, timer should technically be synced or run locally per turn or simple global.
-    // For MVP, just run local decrement visually.
     const interval = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
@@ -229,9 +267,9 @@ const App: React.FC = () => {
     const result = executeMove(pieces, move);
     setPieces(result.pieces);
 
-    // Online Emission
-    if (gameMode === 'ONLINE' && isInitiator && socket) {
-      socket.emit('make_move', { roomId, move });
+    // Online Emission (PeerJS)
+    if (gameMode === 'ONLINE' && isInitiator && conn) {
+      conn.send({ type: 'MOVE', move });
     }
 
     // Handle Capture Animation and Logic
@@ -258,12 +296,6 @@ const App: React.FC = () => {
   // --- Keyboard Logic (Direct Mapping & Coordinates) ---
   const [coordInput, setCoordInput] = useState<string>('');
 
-  // Mapping remains same, assuming Player is using standard controls.
-  // In Online, if I am playing as AI side (Joiner), I might need new key mappings?
-  // User asked for "Online friends playing".
-  // Let's assume standard keys work for "My Side".
-  // Logic: keys select logical pieces.
-
   const KEY_MAPPING: { [key: string]: string } = {
     'z': 'PLAYER-SAMURAI-6',
     'x': 'PLAYER-SAMURAI-7',
@@ -277,14 +309,6 @@ const App: React.FC = () => {
     acc[id] = key.toUpperCase();
     return acc;
   }, {} as { [id: string]: string });
-
-  // NOTE: If playing as AI side online, these IDs are wrong.
-  // However, `pieces` contains all pieces. AI pieces have different IDs.
-  // For now, only Player 1 gets keyboard shortcuts.
-  // Or I could map keys to my pieces dynamically.
-  // Given complexity, let's keep keyboard shortcuts for Player 1 / Local only for now unless requested.
-  // Actually, I should probably disable them for Online P2 (AI side) or map them.
-  // Implementation: Only enable if I am PlayerType.PLAYER.
 
   useEffect(() => {
     if (!started || gameOver) return;
@@ -457,12 +481,12 @@ const App: React.FC = () => {
                 <div className="flex gap-2">
                   <input
                     value={joinCodeInput}
-                    onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
-                    placeholder="ROOM CODE"
-                    className="flex-1 border-2 border-gray-300 rounded-lg px-4 py-2 font-mono text-center uppercase focus:border-black outline-none font-bold"
+                    onChange={(e) => setJoinCodeInput(e.target.value)}
+                    placeholder="Enter Room ID"
+                    className="flex-1 border-2 border-gray-300 rounded-lg px-4 py-2 font-mono text-center focus:border-black outline-none font-bold"
                   />
                   <button
-                    onClick={() => socket?.emit('join_room', joinCodeInput)}
+                    onClick={() => joinRoom(joinCodeInput)}
                     disabled={!joinCodeInput}
                     className="bg-black text-white px-4 py-2 rounded-lg font-bold disabled:opacity-50"
                   >
@@ -477,10 +501,7 @@ const App: React.FC = () => {
               </div>
 
               <button
-                onClick={() => {
-                  const newId = Math.random().toString(36).substring(2, 6).toUpperCase();
-                  socket?.emit('create_room', newId);
-                }}
+                onClick={createRoom}
                 className="w-full py-3 border-2 border-black text-black font-bold rounded-lg hover:bg-gray-50"
               >
                 CREATE NEW ROOM
@@ -489,16 +510,28 @@ const App: React.FC = () => {
           ) : (
             <div className="py-8 space-y-4">
               <div className="animate-spin w-8 h-8 border-4 border-black border-t-transparent rounded-full mx-auto"></div>
-              <p className="font-bold text-gray-600">Waiting for Opponent...</p>
-              <div className="bg-gray-100 p-4 rounded-lg">
-                <p className="text-xs text-gray-400 uppercase font-bold">Room Code</p>
-                <p className="text-4xl font-mono font-black tracking-widest">{roomId}</p>
-              </div>
-              <p className="text-xs text-gray-400">Share this code with your friend</p>
+              <p className="font-bold text-gray-600">
+                {lobbyStatus === 'CONNECTING' ? "Connecting to Room..." : "Waiting for Opponent..."}
+              </p>
+              {roomId && (
+                <>
+                  <div className="bg-gray-100 p-4 rounded-lg">
+                    <p className="text-xs text-gray-400 uppercase font-bold">Room Code</p>
+                    <p className="text-2xl font-mono font-black break-all">{roomId}</p>
+                  </div>
+                  <p className="text-xs text-gray-400">Share this code with your friend</p>
+                </>
+              )}
             </div>
           )}
 
-          <button onClick={() => { setView('SETUP'); setLobbyStatus('IDLE'); }} className="text-sm text-gray-400 hover:text-black underline">Cancel</button>
+          <button onClick={() => {
+            peer?.destroy();
+            setPeer(null);
+            setConn(null);
+            setView('SETUP');
+            setLobbyStatus('IDLE');
+          }} className="text-sm text-gray-400 hover:text-black underline">Cancel</button>
         </div>
       </div>
     );
@@ -563,8 +596,8 @@ const App: React.FC = () => {
           {!gameOver && (
             <span className={`px-4 py-1 rounded-full text-sm font-bold border ${currentPlayer === PlayerType.PLAYER ? 'bg-blue-50 border-blue-200 text-blue-600' : 'bg-red-50 border-red-200 text-red-600'}`}>
               {currentPlayer === PlayerType.PLAYER
-                ? "Player 1's Turn"
-                : "Opponent's Turn"}
+                ? (gameMode === 'ONLINE' ? (myOnlineRole === PlayerType.PLAYER ? "Your Turn" : "Opponent's Turn") : "Player 1's Turn")
+                : (gameMode === 'ONLINE' ? (myOnlineRole === PlayerType.AI ? "Your Turn" : "Opponent's Turn") : "Opponent's Turn")}
             </span>
           )}
 
@@ -613,6 +646,10 @@ const App: React.FC = () => {
               onClick={() => {
                 setStarted(false);
                 setView('SETUP');
+                peer?.destroy();
+                setPeer(null);
+                setConn(null);
+                setLobbyStatus('IDLE');
               }}
               className="w-full py-3 bg-black text-white font-bold rounded-lg shadow-lg hover:bg-gray-800 transition-all"
             >
